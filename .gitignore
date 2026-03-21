@@ -1,0 +1,44 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.env
+.venv
+
+# Data (Ignore raw, processed, and temporary datasets)
+data/
+*.csv
+*.xlsx
+*.dat
+*.json
+
+# Machine Learning models (often large and binary)
+models/
+*.h5
+*.hdf5
+*.pkl
+*.joblib
+*.pb
+
+# Plots / Generated Figures
+plots/
+*.png
+*.jpg
+*.jpeg
+*.svg
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
