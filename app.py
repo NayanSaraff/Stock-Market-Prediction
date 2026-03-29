@@ -34,20 +34,253 @@ from src.models   import (
 )
 from src.signals  import generate_signal, ensemble_prob, trend_label
 
+if "sidebar_hidden" not in st.session_state:
+    st.session_state.sidebar_hidden = False
+
+# ── MODEL CACHING ─────────────────────────────────────────────
+
+@st.cache_resource
+def get_arima_model(close):
+    return train_arima(close)
+
+
+@st.cache_resource
+def get_lstm_model(feat_df, feature_cols, ticker):
+    model_path = os.path.join("cache", f"{ticker.replace('.','_')}_lstm.keras")
+
+    return train_lstm(
+        feat_df, feature_cols,
+        window=60,
+        train_ratio=0.8,
+        epochs=12,          # faster default for dashboard responsiveness
+        batch_size=32,
+        patience=3,
+        model_path=model_path,
+    )
+
 # ── custom CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-.signal-card {
-    border-radius: 16px;
-    padding: 28px 36px;
-    text-align: center;
-    margin: 12px 0;
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
+
+:root {
+    --bb-bg: #0a0d12;
+    --bb-panel: #111723;
+    --bb-panel-2: #0f141e;
+    --bb-border: #2a3345;
+    --bb-accent: #f2a900;
+    --bb-text: #d9e1ee;
+    --bb-muted: #96a3ba;
 }
-.signal-text { font-size: 3rem; font-weight: 900; letter-spacing: 2px; }
-.metric-label { font-size: 0.78rem; color: #aaa; text-transform: uppercase; }
+
+.stApp {
+    background: radial-gradient(circle at top right, #151b28 0%, var(--bb-bg) 42%);
+    color: var(--bb-text);
+    font-family: 'IBM Plex Sans', sans-serif;
+}
+
+.block-container {
+    padding-top: 1.05rem;
+    padding-bottom: 1.6rem;
+}
+
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #121925 0%, #0f141d 100%);
+    border-right: 1px solid var(--bb-border);
+}
+
+[data-testid="stSidebar"] * {
+    font-family: 'IBM Plex Sans', sans-serif;
+}
+
+/* Remove blinking text cursor from selectbox controls (e.g., stock list) */
+div[data-baseweb="select"] input {
+    caret-color: transparent !important;
+    cursor: pointer !important;
+}
+
+div[data-baseweb="select"] input:focus {
+    outline: none !important;
+}
+
+.site-title {
+    text-align: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    font-size: 2.05rem;
+    margin: 0.1rem 0 0.25rem 0;
+    color: var(--bb-accent);
+}
+
+.terminal-strip {
+    border: 1px solid var(--bb-border);
+    background: linear-gradient(90deg, #151d2b 0%, #111825 100%);
+    border-radius: 8px;
+    padding: 0.5rem 0.85rem;
+    margin: 0.4rem 0 0.9rem 0;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--bb-text);
+    font-size: 0.85rem;
+}
+
+.terminal-strip .label {
+    color: var(--bb-muted);
+}
+
+.terminal-strip .value {
+    color: var(--bb-accent);
+    font-weight: 700;
+    margin-right: 1rem;
+}
+
+.terminal-section {
+    margin-top: 0.85rem;
+    margin-bottom: 0.8rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #8a6200;
+    border-radius: 6px;
+    background: linear-gradient(90deg, rgba(242,169,0,0.22) 0%, rgba(242,169,0,0.08) 100%);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.18rem;
+    font-weight: 700;
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
+    text-align: center;
+    color: #f6b93b;
+}
+
+.signal-card {
+    border-radius: 10px;
+    border: 1px solid var(--bb-border);
+    padding: 22px 24px;
+    text-align: center;
+    margin: 10px 0 6px 0;
+    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.35);
+}
+
+.signal-text {
+    font-size: 2.45rem;
+    font-weight: 800;
+    letter-spacing: 1.4px;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.metric-label { font-size: 0.78rem; color: var(--bb-muted); text-transform: uppercase; }
 .metric-val   { font-size: 1.4rem; font-weight: 700; }
+
+[data-testid="stMetric"] {
+    border: 1px solid var(--bb-border);
+    border-radius: 8px;
+    background: linear-gradient(180deg, var(--bb-panel) 0%, var(--bb-panel-2) 100%);
+    padding: 0.55rem 0.75rem;
+}
+
+[data-testid="stMetricLabel"] {
+    color: var(--bb-muted);
+    font-size: 0.64rem;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    line-height: 1.2;
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+}
+
+[data-testid="stMetricValue"] {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--bb-text);
+    font-size: 1.02rem;
+    line-height: 1.2;
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+}
+
+[data-testid="stMetricLabel"] *,
+[data-testid="stMetricValue"] * {
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+}
+
+.stDataFrame, div[data-testid="stTable"] {
+    border: 1px solid var(--bb-border);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+div[data-testid="stPlotlyChart"],
+div[data-testid="stMetric"],
+div[data-testid="stDataFrame"],
+div[data-testid="stInfo"],
+div[data-testid="stWarning"] {
+    margin-top: 0.4rem;
+    margin-bottom: 0.95rem;
+}
+
+div[data-baseweb="tab-list"] {
+    gap: 0.7rem;
+    margin-top: 0.35rem;
+    margin-bottom: 0.95rem;
+}
+
+div[data-baseweb="tab-highlight"],
+div[data-baseweb="tab-border"] {
+    background: transparent !important;
+    height: 0 !important;
+    border: 0 !important;
+    display: none !important;
+}
+
+button[data-baseweb="tab"] {
+    border: 1px solid var(--bb-border) !important;
+    border-radius: 12px !important;
+    background: #0f1520 !important;
+    color: var(--bb-text) !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    text-transform: uppercase;
+    font-size: 0.75rem !important;
+    padding: 0.52rem 0.9rem !important;
+    transition: all 0.2s ease;
+}
+
+button[data-baseweb="tab"][aria-selected="true"] {
+    color: #141414 !important;
+    background: var(--bb-accent) !important;
+    border-color: #ffcc53 !important;
+}
+
+button[data-testid="baseButton-secondary"] {
+    background: #0f1520 !important;
+    color: #d9e1ee !important;
+    border: 1px solid var(--bb-border) !important;
+    border-radius: 10px !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    font-weight: 700 !important;
+}
 </style>
 """, unsafe_allow_html=True)
+
+st.markdown("<h1 class='site-title'>NSE Stock Predictor</h1>", unsafe_allow_html=True)
+
+ctrl_col1, _ = st.columns([0.75, 7.25])
+with ctrl_col1:
+    toggle_label = "❯❯" if st.session_state.sidebar_hidden else "❮❮"
+    if st.button(toggle_label, key="sidebar_toggle_arrow", help="Toggle sidebar", use_container_width=True):
+        st.session_state.sidebar_hidden = not st.session_state.sidebar_hidden
+        st.rerun()
+
+if st.session_state.sidebar_hidden:
+    st.markdown(
+        """
+        <style>
+        section[data-testid="stSidebar"] { display: none !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # ── stock universe ────────────────────────────────────────────────────────────
 NSE_STOCKS = {
@@ -101,14 +334,52 @@ NSE_STOCKS = {
     },
 }
 
+# Ticker -> primary company website domain (used with Clearbit logo endpoint)
+STOCK_LOGO_DOMAINS = {
+    "TCS.NS": "tcs.com",
+    "INFY.NS": "infosys.com",
+    "WIPRO.NS": "wipro.com",
+    "HCLTECH.NS": "hcltech.com",
+    "TECHM.NS": "techmahindra.com",
+    "HDFCBANK.NS": "hdfcbank.com",
+    "ICICIBANK.NS": "icicibank.com",
+    "SBIN.NS": "sbi.co.in",
+    "KOTAKBANK.NS": "kotak.com",
+    "AXISBANK.NS": "axisbank.com",
+    "BAJFINANCE.NS": "bajajfinserv.in",
+    "RELIANCE.NS": "ril.com",
+    "ONGC.NS": "ongcindia.com",
+    "NTPC.NS": "ntpc.co.in",
+    "POWERGRID.NS": "powergrid.in",
+    "ADANIGREEN.NS": "adanigreenenergy.com",
+    "HINDUNILVR.NS": "hul.co.in",
+    "ITC.NS": "itcportal.com",
+    "NESTLEIND.NS": "nestle.in",
+    "ASIANPAINT.NS": "asianpaints.com",
+    "TITAN.NS": "titancompany.in",
+    "MARUTI.NS": "marutisuzuki.com",
+    "TATAMOTORS.NS": "tatamotors.com",
+    "BAJAJ-AUTO.NS": "bajajauto.com",
+    "M&M.NS": "mahindra.com",
+    "HEROMOTOCO.NS": "heromotocorp.com",
+    "SUNPHARMA.NS": "sunpharma.com",
+    "DRREDDY.NS": "drreddys.com",
+    "CIPLA.NS": "cipla.com",
+    "DIVISLAB.NS": "divislabs.com",
+    "TATASTEEL.NS": "tatasteel.com",
+    "JSWSTEEL.NS": "jsw.in",
+    "HINDALCO.NS": "hindalco.com",
+    "COALINDIA.NS": "coalindia.in",
+}
+
 # Flat label → ticker map and label → sector map for lookup
 _LABEL_TO_TICKER = {
-    f"{name} ({sector})": tick
+    name: tick
     for sector, stocks in NSE_STOCKS.items()
     for name, tick in stocks.items()
 }
 _LABEL_TO_SECTOR = {
-    f"{name} ({sector})": sector
+    name: sector
     for sector, stocks in NSE_STOCKS.items()
     for name in stocks
 }
@@ -116,16 +387,11 @@ _LABELS = list(_LABEL_TO_TICKER.keys())
 
 # ── sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("NSE Predictor")
-
     sector_choice = st.selectbox("Sector", ["All"] + list(NSE_STOCKS.keys()))
     if sector_choice == "All":
         filtered_labels = _LABELS
     else:
-        filtered_labels = [
-            f"{name} ({sector_choice})"
-            for name in NSE_STOCKS[sector_choice]
-        ]
+        filtered_labels = list(NSE_STOCKS[sector_choice].keys())
 
     selected_label  = st.selectbox("Stock", filtered_labels)
     ticker          = _LABEL_TO_TICKER[selected_label]
@@ -134,7 +400,7 @@ with st.sidebar:
 
     years         = st.slider("Historical data (years)", 2, 7, 5)
     forecast_days = st.slider("Forecast horizon (days)", 5, 60, 30)
-    run_btn       = st.button("Run Prediction", type="primary", width="stretch")
+    run_btn       = st.button("Run Prediction", type="primary", use_container_width=True)
     auto_refresh  = st.toggle("Auto-refresh every 5 min", value=False)
     st.caption("Data via yfinance · Models trained fresh per stock")
 
@@ -143,6 +409,8 @@ if "results" not in st.session_state:
     st.session_state.results = None
 if "last_ticker" not in st.session_state:
     st.session_state.last_ticker = None
+if "auto_refresh_due" not in st.session_state:
+    st.session_state.auto_refresh_due = False
 
 # ── auto-refresh countdown ────────────────────────────────────────────────────
 if auto_refresh:
@@ -152,12 +420,13 @@ if auto_refresh:
     remaining = int(st.session_state.next_refresh - time.time())
     if remaining <= 0:
         st.session_state.next_refresh = time.time() + 300
+        st.session_state.auto_refresh_due = True
         st.rerun()
     refresh_placeholder.info(f"Next refresh in {remaining}s")
 
 
 # ── cached data fetchers ──────────────────────────────────────────────────────
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, show_spinner=False)
 def load_data(ticker: str, years: int, sector: str):
     df            = fetch_ohlcv(ticker, years)
     nifty, usdinr = fetch_market_context(years)
@@ -194,12 +463,29 @@ def safe_last(series: pd.Series, default=0):
         return default
 
 
+def get_stock_logo_url(ticker: str, stock_name: str) -> str:
+    domain = STOCK_LOGO_DOMAINS.get(ticker)
+    if domain:
+        return f"https://logo.clearbit.com/{domain}"
+    fallback = stock_name.replace(" ", "+")
+    return (
+        "https://ui-avatars.com/api/"
+        f"?name={fallback}&background=0f141e&color=f2a900&size=96&bold=true"
+    )
+
+
+def terminal_section(title: str):
+    st.markdown(f"<div class='terminal-section'>{title}</div>", unsafe_allow_html=True)
+
+
 # ── main pipeline ─────────────────────────────────────────────────────────────
 def run_pipeline(ticker: str, years: int, forecast_days: int, sector: str):
     results = {}
 
     with st.spinner("Fetching market data + sector index..."):
         df, feat_df, feature_cols, info = load_data(ticker, years, sector)
+        # Use recent window to keep retraining fast on stock switches.
+        feat_df = feat_df.tail(500)
     results["df"]           = df
     results["feat_df"]      = feat_df
     results["feature_cols"] = feature_cols
@@ -208,8 +494,8 @@ def run_pipeline(ticker: str, years: int, forecast_days: int, sector: str):
     # ── ARIMA ──
     with st.spinner("Training ARIMA model (~30 seconds)..."):
         close = feat_df["Close"]
-        arima_model, arima_split = train_arima(close)
-        arima_preds  = arima_rolling_forecast(close, arima_model, arima_split)
+        arima_model, arima_split = get_arima_model(close)
+        arima_preds, arima_model = arima_rolling_forecast(close, arima_model, arima_split)
         arima_actual = close.iloc[arima_split:].values
         arima_met    = arima_metrics(arima_actual, arima_preds)
         fc, lo, hi   = arima_future_forecast(arima_model, forecast_days)
@@ -236,11 +522,8 @@ def run_pipeline(ticker: str, years: int, forecast_days: int, sector: str):
     # ── LSTM ──
     model_path = os.path.join("cache", f"{ticker.replace('.','_')}_lstm.keras")
     with st.spinner("Training LSTM model (60–120 seconds)..."):
-        lstm_model, scaler, history, split_idx, X_test, y_test = train_lstm(
-            feat_df, feature_cols,
-            window=60, train_ratio=0.8,
-            epochs=100, batch_size=32, patience=10,
-            model_path=model_path,
+        lstm_model, scaler, history, split_idx, X_test, y_test = get_lstm_model(
+            feat_df, feature_cols, ticker
         )
         lstm_prob = lstm_predict_latest(lstm_model, scaler, feat_df, feature_cols)
         lstm_met  = lstm_metrics(lstm_model, X_test, y_test)
@@ -250,28 +533,35 @@ def run_pipeline(ticker: str, years: int, forecast_days: int, sector: str):
         X_test=X_test, y_test=y_test,
     )
 
-    # ── Walk-Forward Validation ──
-    with st.spinner("Running walk-forward validation (5 folds)..."):
-        wfv = walk_forward_validate(
-            feat_df, feature_cols, feat_df["Close"],
-            lstm_model, scaler,
-            n_splits=5, initial_train_ratio=0.6, window=60,
-        )
-    results["wfv"] = wfv
-
     return results
 
 
+@st.cache_resource(ttl=1800)
+def get_pipeline_results(ticker: str, years: int, forecast_days: int, sector: str):
+    """Cache full pipeline per stock/settings to speed up revisits."""
+    return run_pipeline(ticker, years, forecast_days, sector)
+
+
 # ── trigger pipeline ──────────────────────────────────────────────────────────
-if run_btn or (auto_refresh and st.session_state.results is None):
-    st.session_state.results     = run_pipeline(ticker, years, forecast_days, active_sector)
+should_auto_refresh = (
+    auto_refresh
+    and st.session_state.auto_refresh_due
+    and st.session_state.last_ticker == ticker
+)
+
+if run_btn or should_auto_refresh:
+    st.session_state.results = get_pipeline_results(ticker, years, forecast_days, active_sector)
     st.session_state.last_ticker = ticker
+    st.session_state.auto_refresh_due = False
 
 results = st.session_state.results
 
 if results is None:
     st.info("Configure settings in the sidebar and click **Run Prediction** to begin.")
     st.stop()
+
+display_ticker = st.session_state.last_ticker or ticker
+display_sector = results["info"].get("sector", active_sector)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 1 — Live Stock Info
@@ -280,7 +570,35 @@ info   = results["info"]
 feat_df = results["feat_df"]
 df      = results["df"]
 
-st.markdown(f"## {info['name']}  `{ticker}`")
+st.markdown(
+    (
+        "<div class='terminal-strip'>"
+        f"<span class='label'>Instrument:</span> <span class='value'>{display_ticker}</span>"
+        f"<span class='label'>Sector:</span> <span class='value'>{display_sector}</span>"
+        f"<span class='label'>Horizon:</span> <span class='value'>{forecast_days}D</span>"
+        f"<span class='label'>Updated:</span> <span class='value'>{time.strftime('%d-%b-%Y %H:%M:%S')}</span>"
+        "</div>"
+    ),
+    unsafe_allow_html=True,
+)
+
+terminal_section("Market Snapshot")
+display_name = info.get("name") or display_ticker
+logo_url = get_stock_logo_url(display_ticker, display_name)
+st.markdown(
+        f"""
+        <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:0.15rem;">
+            <img src="{logo_url}" alt="{display_name} logo"
+                     style="width:42px; height:42px; border-radius:8px; border:1px solid #2a3345;
+                                    background:#111723; object-fit:contain; padding:4px;" />
+            <div style="font-size:1.75rem; font-weight:700; line-height:1.2; color:#d9e1ee;">
+                {display_name}
+                <span style="font-family:'JetBrains Mono', monospace; color:#f2a900; font-size:1.05rem;">{display_ticker}</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+)
 st.caption(f"Sector: {info['sector']}")
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -295,11 +613,9 @@ c4.metric("52-Week Low",    f"₹{info['week52_low']:,.2f}")
 c5.metric("Volume",         f"{info['volume']:,}" if info['volume'] else "N/A")
 c6.metric("Market Cap",     fmt_inr(info['market_cap']) if info['market_cap'] else "N/A")
 
-st.divider()
+st.markdown("<div style='height:0.35rem;'></div>", unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 2 — Signal Card
-# ─────────────────────────────────────────────────────────────────────────────
+terminal_section("Signal Engine")
 arima_r = results["arima"]
 lstm_r  = results["lstm"]
 xgb_r   = results["xgb"]
@@ -339,12 +655,9 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-st.divider()
+st.markdown("<div style='height:0.55rem;'></div>", unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 3 — Interactive Price Chart (Candlestick + Volume)
-# ─────────────────────────────────────────────────────────────────────────────
-st.subheader("Price Chart — Last 6 Months")
+terminal_section("Price Action | Last 6 Months")
 chart_df = feat_df.iloc[-130:]  # ~6 months
 
 fig_price = make_subplots(
@@ -393,63 +706,67 @@ fig_price.add_trace(go.Bar(
 
 fig_price.update_layout(
     height=520, xaxis_rangeslider_visible=False,
-    template="plotly_dark", margin=dict(l=0, r=0, t=20, b=0),
-    legend=dict(orientation="h", y=1.02),
+    template="plotly_dark", margin=dict(l=0, r=0, t=60, b=10),
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=1.02,
+        xanchor="left",
+        x=0,
+    ),
 )
-st.plotly_chart(fig_price, width="stretch")
+st.plotly_chart(fig_price, use_container_width=True)
 
-st.divider()
+st.markdown("<div style='height:0.55rem;'></div>", unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 4 — Technical Indicators
-# ─────────────────────────────────────────────────────────────────────────────
-st.subheader("Technical Indicators")
+terminal_section("Technical Indicators")
 ind_df = feat_df.iloc[-260:]  # ~1 year for indicators
 
-col_rsi, col_macd, col_bbw = st.columns(3)
+fig_rsi = go.Figure()
+fig_rsi.add_trace(go.Scatter(x=ind_df.index, y=ind_df["rsi"],
+                              line=dict(color="#7c4dff"), name="RSI"))
+fig_rsi.add_hline(y=70, line_dash="dash", line_color="red",   annotation_text="Overbought")
+fig_rsi.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Oversold")
+fig_rsi.update_layout(title=dict(text="RSI (14)", font=dict(size=24), x=0.01, xanchor="left"), height=280,
+                       template="plotly_dark", margin=dict(l=0, r=0, t=40, b=0),
+                       showlegend=False)
+st.plotly_chart(fig_rsi, use_container_width=True)
+st.markdown("<div style='height: 1.8rem;'></div>", unsafe_allow_html=True)
 
-with col_rsi:
-    fig_rsi = go.Figure()
-    fig_rsi.add_trace(go.Scatter(x=ind_df.index, y=ind_df["rsi"],
-                                  line=dict(color="#7c4dff"), name="RSI"))
-    fig_rsi.add_hline(y=70, line_dash="dash", line_color="red",   annotation_text="Overbought")
-    fig_rsi.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Oversold")
-    fig_rsi.update_layout(title="RSI (14)", height=280,
-                           template="plotly_dark", margin=dict(l=0, r=0, t=40, b=0),
-                           showlegend=False)
-    st.plotly_chart(fig_rsi, width="stretch")
+fig_macd = go.Figure()
+fig_macd.add_trace(go.Scatter(x=ind_df.index, y=ind_df["macd"],
+                               line=dict(color="#2196f3"), name="MACD"))
+fig_macd.add_trace(go.Scatter(x=ind_df.index, y=ind_df["macd_signal"],
+                               line=dict(color="orange"), name="Signal"))
+hist_colors = ["#26a69a" if v >= 0 else "#ef5350"
+               for v in ind_df["macd_hist"].fillna(0)]
+fig_macd.add_trace(go.Bar(x=ind_df.index, y=ind_df["macd_hist"],
+                           marker_color=hist_colors, name="Histogram"))
+fig_macd.update_layout(title=dict(text="MACD", font=dict(size=24), x=0.01, xanchor="left"), height=280,
+                        template="plotly_dark", margin=dict(l=0, r=0, t=70, b=0),
+                        legend=dict(
+                            orientation="h",
+                            yanchor="bottom",
+                            y=1.02,
+                            xanchor="left",
+                            x=0,
+                            font_size=10,
+                        ))
+st.plotly_chart(fig_macd, use_container_width=True)
+st.markdown("<div style='height: 1.8rem;'></div>", unsafe_allow_html=True)
 
-with col_macd:
-    fig_macd = go.Figure()
-    fig_macd.add_trace(go.Scatter(x=ind_df.index, y=ind_df["macd"],
-                                   line=dict(color="#2196f3"), name="MACD"))
-    fig_macd.add_trace(go.Scatter(x=ind_df.index, y=ind_df["macd_signal"],
-                                   line=dict(color="orange"), name="Signal"))
-    hist_colors = ["#26a69a" if v >= 0 else "#ef5350"
-                   for v in ind_df["macd_hist"].fillna(0)]
-    fig_macd.add_trace(go.Bar(x=ind_df.index, y=ind_df["macd_hist"],
-                               marker_color=hist_colors, name="Histogram"))
-    fig_macd.update_layout(title="MACD", height=280,
-                            template="plotly_dark", margin=dict(l=0, r=0, t=40, b=0),
-                            legend=dict(orientation="h", y=1.15, font_size=10))
-    st.plotly_chart(fig_macd, width="stretch")
+fig_bbw = go.Figure()
+fig_bbw.add_trace(go.Scatter(x=ind_df.index, y=ind_df["bb_width"],
+                              fill="tozeroy", line=dict(color="#ff6f00"),
+                              name="BB Width"))
+fig_bbw.update_layout(title=dict(text="Bollinger Band Width (Squeeze Indicator)", font=dict(size=24), x=0.01, xanchor="left"),
+                       height=280, template="plotly_dark",
+                       margin=dict(l=0, r=0, t=40, b=0), showlegend=False)
+st.plotly_chart(fig_bbw, use_container_width=True)
 
-with col_bbw:
-    fig_bbw = go.Figure()
-    fig_bbw.add_trace(go.Scatter(x=ind_df.index, y=ind_df["bb_width"],
-                                  fill="tozeroy", line=dict(color="#ff6f00"),
-                                  name="BB Width"))
-    fig_bbw.update_layout(title="Bollinger Band Width (Squeeze Indicator)",
-                           height=280, template="plotly_dark",
-                           margin=dict(l=0, r=0, t=40, b=0), showlegend=False)
-    st.plotly_chart(fig_bbw, width="stretch")
+st.markdown("<div style='height:0.55rem;'></div>", unsafe_allow_html=True)
 
-st.divider()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 5 — Model Performance & Forecast
-# ─────────────────────────────────────────────────────────────────────────────
-st.subheader("Model Performance & Forecast")
+terminal_section("Model Performance & Forecast")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     ["ARIMA Evaluation", "LSTM Training", "Future Forecast", "Metrics Comparison", "Walk-Forward Validation"]
@@ -468,9 +785,16 @@ with tab1:
         name="ARIMA Predicted", line=dict(color="#ff5722", dash="dash"),
     ))
     fig_arima.update_layout(title="ARIMA: Actual vs Predicted (Test Set)",
-                             height=380, template="plotly_dark",
-                             margin=dict(l=0, r=0, t=40, b=0))
-    st.plotly_chart(fig_arima, width="stretch")
+                             height=400, template="plotly_dark",
+                             margin=dict(l=0, r=0, t=70, b=10),
+                             legend=dict(
+                                 orientation="h",
+                                 yanchor="bottom",
+                                 y=1.02,
+                                 xanchor="left",
+                                 x=0,
+                             ))
+    st.plotly_chart(fig_arima, use_container_width=True)
 
     m = arima_r["metrics"]
     ca, cb, cc = st.columns(3)
@@ -494,7 +818,7 @@ with tab2:
                                    name="Val Loss", line=dict(color="#ffa726", dash="dot")))
     fig_hist.update_layout(title="LSTM Training Curves",
                             height=380, template="plotly_dark",
-                            margin=dict(l=0, r=0, t=40, b=0),
+                            margin=dict(l=0, r=0, t=80, b=0),
                             legend=dict(orientation="h", y=1.1))
     st.plotly_chart(fig_hist, use_container_width=True)
 
@@ -574,6 +898,8 @@ with tab2:
 
 # ── Tab 3: Future forecast ────────────────────────────────────────────────────
 with tab3:
+    st.markdown("<span style='margin-top:-1.2rem; margin-bottom:0.5rem; display:block; font-size:1.02rem; color:#f2a900; font-weight:600;'>ARIMA Forecast (Actual, Forecast, 95% CI)</span>", unsafe_allow_html=True)
+    
     last_actual = feat_df["Close"].iloc[-60:]
     last_date   = feat_df.index[-1]
     future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1),
@@ -598,10 +924,18 @@ with tab3:
         line=dict(color="rgba(239,83,80,0)"),
         name="95% CI",
     ))
-    fig_fc.update_layout(title=f"ARIMA {forecast_days}-Day Forecast with 95% CI",
-                          height=420, template="plotly_dark",
-                          margin=dict(l=0, r=0, t=40, b=0))
-    st.plotly_chart(fig_fc, width="stretch")
+    fig_fc.update_layout(
+        height=420, template="plotly_dark",
+        margin=dict(l=0, r=0, t=70, b=10),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+        ),
+    )
+    st.plotly_chart(fig_fc, use_container_width=True)
 
 # ── Tab 4: Side-by-side metrics + feature importance ──────────────────────────
 with tab4:
@@ -638,7 +972,10 @@ with tab4:
             "F1 Score":  f"{lm['F1']*100:.1f}%",
         },
     })
-    st.dataframe(comparison, width="stretch")
+    
+    # Center-align all columns in the dataframe
+    styled_comparison = comparison.style.set_properties(**{'text-align': 'center'}).set_table_styles([{'selector': 'th', 'props': [('text-align', 'center')]}])
+    st.dataframe(styled_comparison, use_container_width=True)
 
     # XGBoost feature importance chart — top 15
     st.subheader("Top 15 Most Important Features (XGBoost)")
@@ -655,12 +992,14 @@ with tab4:
         margin=dict(l=0, r=0, t=20, b=0),
         yaxis=dict(autorange="reversed"),
     )
-    st.plotly_chart(fig_imp, width="stretch")
+    st.plotly_chart(fig_imp, use_container_width=True)
 
 # ── Tab 5: Walk-Forward Validation ───────────────────────────────────────────
 with tab5:
-    wfv_data = results["wfv"]
-    folds_df = wfv_data["folds"]
+    if "wfv_cache" not in st.session_state:
+        st.session_state.wfv_cache = {}
+
+    wfv_key = f"{display_ticker}|{years}|{forecast_days}|{display_sector}"
 
     st.markdown("""
     **Walk-Forward Validation** trains on all data up to each fold boundary and tests
@@ -668,46 +1007,61 @@ with tab5:
     single train/test split.
     """)
 
-    if folds_df.empty:
-        st.warning("Not enough data to run walk-forward validation.")
-    else:
-        # Accuracy chart per fold
-        fig_wfv = go.Figure()
-        fig_wfv.add_trace(go.Bar(
-            x=folds_df["Fold"].astype(str),
-            y=folds_df["XGB Accuracy"],
-            name="XGBoost (retrained each fold)",
-            marker_color="#42a5f5",
-        ))
-        lstm_vals = folds_df["LSTM Accuracy"].dropna()
-        if not lstm_vals.empty:
+    if wfv_key not in st.session_state.wfv_cache:
+        if st.button("Run Walk-Forward Validation", use_container_width=True):
+            with st.spinner("Running walk-forward validation (5 folds)..."):
+                st.session_state.wfv_cache[wfv_key] = walk_forward_validate(
+                    feat_df, results["feature_cols"], feat_df["Close"],
+                    lstm_r["model"], lstm_r["scaler"],
+                    n_splits=5, initial_train_ratio=0.6, window=60,
+                )
+            st.rerun()
+        else:
+            st.info("Walk-forward validation is on-demand now. Click the button above to run it.")
+    if wfv_key in st.session_state.wfv_cache:
+        wfv_data = st.session_state.wfv_cache[wfv_key]
+        folds_df = wfv_data["folds"]
+
+        if folds_df.empty:
+            st.warning("Not enough data to run walk-forward validation.")
+        else:
+            # Accuracy chart per fold
+            fig_wfv = go.Figure()
             fig_wfv.add_trace(go.Bar(
-                x=folds_df.loc[folds_df["LSTM Accuracy"].notna(), "Fold"].astype(str),
-                y=folds_df["LSTM Accuracy"].dropna(),
-                name="LSTM (fixed model, rolling eval)",
-                marker_color="#ef5350",
+                x=folds_df["Fold"].astype(str),
+                y=folds_df["XGB Accuracy"],
+                name="XGBoost (retrained each fold)",
+                marker_color="#42a5f5",
             ))
-        fig_wfv.add_hline(y=50, line_dash="dash", line_color="gray",
-                           annotation_text="Random baseline (50%)")
-        fig_wfv.update_layout(
-            title="Accuracy per Walk-Forward Fold",
-            xaxis_title="Fold", yaxis_title="Accuracy (%)",
-            height=380, template="plotly_dark", barmode="group",
-            margin=dict(l=0, r=0, t=40, b=0),
-            yaxis=dict(range=[40, 100]),
-        )
-        st.plotly_chart(fig_wfv, use_container_width=True)
+            lstm_vals = folds_df["LSTM Accuracy"].dropna()
+            if not lstm_vals.empty:
+                fig_wfv.add_trace(go.Bar(
+                    x=folds_df.loc[folds_df["LSTM Accuracy"].notna(), "Fold"].astype(str),
+                    y=folds_df["LSTM Accuracy"].dropna(),
+                    name="LSTM (fixed model, rolling eval)",
+                    marker_color="#ef5350",
+                ))
+            fig_wfv.add_hline(y=50, line_dash="dash", line_color="gray",
+                               annotation_text="Random baseline (50%)")
+            fig_wfv.update_layout(
+                title="Accuracy per Walk-Forward Fold",
+                xaxis_title="Fold", yaxis_title="Accuracy (%)",
+                height=380, template="plotly_dark", barmode="group",
+                margin=dict(l=0, r=0, t=40, b=0),
+                yaxis=dict(range=[40, 100]),
+            )
+            st.plotly_chart(fig_wfv, use_container_width=True)
 
-        # Summary stats
-        st.markdown("**Per-fold detail**")
-        st.dataframe(folds_df.set_index("Fold"), use_container_width=True)
+            # Summary stats
+            st.markdown("**Per-fold detail**")
+            st.dataframe(folds_df.set_index("Fold"), use_container_width=True)
 
-        xgb_mean = folds_df["XGB Accuracy"].mean()
-        xgb_std  = folds_df["XGB Accuracy"].std()
-        st.info(
-            f"XGBoost walk-forward mean accuracy: **{xgb_mean:.1f}%** ± {xgb_std:.1f}%  "
-            f"(vs single-split: {xgb_r['metrics']['Accuracy']*100:.1f}%)"
-        )
+            xgb_mean = folds_df["XGB Accuracy"].mean()
+            xgb_std  = folds_df["XGB Accuracy"].std()
+            st.info(
+                f"XGBoost walk-forward mean accuracy: **{xgb_mean:.1f}%** ± {xgb_std:.1f}%  "
+                f"(vs single-split: {xgb_r['metrics']['Accuracy']*100:.1f}%)"
+            )
 
 # ── footer ────────────────────────────────────────────────────────────────────
 st.divider()

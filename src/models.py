@@ -9,38 +9,41 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
+
 # ── ARIMA ─────────────────────────────────────────────────────────────────────
 
 def train_arima(close_series: pd.Series, train_ratio: float = 0.8):
-    """Fit auto_arima on training portion, return model + split index."""
-    import pmdarima as pm
+    """Fast ARIMA (no heavy auto search)."""
+    from statsmodels.tsa.arima.model import ARIMA
+
     split = int(len(close_series) * train_ratio)
     train = close_series.iloc[:split]
-    model = pm.auto_arima(
-        train, d=1, seasonal=False,
-        stepwise=True, suppress_warnings=True,
-        error_action="ignore",
-    )
+
+    # 🔥 Fixed order (VERY fast)
+    model = ARIMA(train, order=(1, 1, 1)).fit()
+
     return model, split
 
 
 def arima_rolling_forecast(close_series: pd.Series,
                             model,
-                            split: int) -> np.ndarray:
+                            split: int) -> tuple[np.ndarray, object]:
     """One-step-ahead rolling forecast on the test set."""
-    history = list(close_series.iloc[:split])
+    working_model = model
     preds = []
     for val in close_series.iloc[split:]:
-        fc = float(np.asarray(model.predict(n_periods=1)).flat[0])
+        fc = float(np.asarray(working_model.forecast(steps=1)).flat[0])
         preds.append(fc)
-        model.update([val])
-        history.append(val)
-    return np.array(preds)
+        # Append each observed point without refitting full ARIMA params.
+        working_model = working_model.append([float(val)], refit=False)
+    return np.array(preds), working_model
 
 
 def arima_future_forecast(model, n_periods: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Forecast n_periods ahead with 95% confidence interval."""
-    fc, conf = model.predict(n_periods=n_periods, return_conf_int=True)
+    forecast_res = model.get_forecast(steps=n_periods)
+    fc = np.asarray(forecast_res.predicted_mean)
+    conf = np.asarray(forecast_res.conf_int())
     return fc, conf[:, 0], conf[:, 1]
 
 
