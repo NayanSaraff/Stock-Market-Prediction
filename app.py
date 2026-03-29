@@ -25,12 +25,14 @@ st.set_page_config(
 
 # ── imports from src ──────────────────────────────────────────────────────────
 from src.data     import fetch_ohlcv, fetch_market_context, get_stock_info
-from src.features import build_feature_matrix, get_feature_cols
+from src.features import build_feature_matrix, get_feature_cols, SECTOR_INDEX_MAP
 from src.models   import (
     train_arima, arima_rolling_forecast, arima_future_forecast, arima_metrics,
     train_lstm, lstm_predict_latest, lstm_metrics,
+    train_xgboost, xgb_predict_latest, xgb_metrics,
+    walk_forward_validate,
 )
-from src.signals  import generate_signal, trend_label
+from src.signals  import generate_signal, ensemble_prob, trend_label
 
 # ── custom CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -99,11 +101,16 @@ NSE_STOCKS = {
     },
 }
 
-# Flat label → ticker map for lookup
+# Flat label → ticker map and label → sector map for lookup
 _LABEL_TO_TICKER = {
     f"{name} ({sector})": tick
     for sector, stocks in NSE_STOCKS.items()
     for name, tick in stocks.items()
+}
+_LABEL_TO_SECTOR = {
+    f"{name} ({sector})": sector
+    for sector, stocks in NSE_STOCKS.items()
+    for name in stocks
 }
 _LABELS = list(_LABEL_TO_TICKER.keys())
 
@@ -120,13 +127,14 @@ with st.sidebar:
             for name in NSE_STOCKS[sector_choice]
         ]
 
-    selected_label = st.selectbox("Stock", filtered_labels)
-    ticker         = _LABEL_TO_TICKER[selected_label]
+    selected_label  = st.selectbox("Stock", filtered_labels)
+    ticker          = _LABEL_TO_TICKER[selected_label]
+    active_sector   = _LABEL_TO_SECTOR[selected_label]
     st.caption(f"Ticker: `{ticker}`")
 
     years         = st.slider("Historical data (years)", 2, 7, 5)
     forecast_days = st.slider("Forecast horizon (days)", 5, 60, 30)
-    run_btn       = st.button("Run Prediction", type="primary", use_container_width=True)
+    run_btn       = st.button("Run Prediction", type="primary", width="stretch")
     auto_refresh  = st.toggle("Auto-refresh every 5 min", value=False)
     st.caption("Data via yfinance · Models trained fresh per stock")
 
@@ -150,12 +158,20 @@ if auto_refresh:
 
 # ── cached data fetchers ──────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
-def load_data(ticker: str, years: int):
-    df              = fetch_ohlcv(ticker, years)
-    nifty, usdinr   = fetch_market_context(years)
-    info            = get_stock_info(ticker)
-    feat_df         = build_feature_matrix(df, nifty, usdinr)
-    feature_cols    = get_feature_cols(feat_df)
+def load_data(ticker: str, years: int, sector: str):
+    df            = fetch_ohlcv(ticker, years)
+    nifty, usdinr = fetch_market_context(years)
+    info          = get_stock_info(ticker)
+    # Fetch sector index if available; silently skip on failure
+    sector_df = None
+    sector_ticker = SECTOR_INDEX_MAP.get(sector)
+    if sector_ticker:
+        try:
+            sector_df = fetch_ohlcv(sector_ticker, years)
+        except Exception:
+            sector_df = None
+    feat_df      = build_feature_matrix(df, nifty, usdinr, sector_df, ticker=ticker)
+    feature_cols = get_feature_cols(feat_df)
     return df, feat_df, feature_cols, info
 
 
@@ -179,18 +195,18 @@ def safe_last(series: pd.Series, default=0):
 
 
 # ── main pipeline ─────────────────────────────────────────────────────────────
-def run_pipeline(ticker: str, years: int, forecast_days: int):
+def run_pipeline(ticker: str, years: int, forecast_days: int, sector: str):
     results = {}
 
-    with st.spinner("Fetching market data..."):
-        df, feat_df, feature_cols, info = load_data(ticker, years)
+    with st.spinner("Fetching market data + sector index..."):
+        df, feat_df, feature_cols, info = load_data(ticker, years, sector)
     results["df"]           = df
     results["feat_df"]      = feat_df
     results["feature_cols"] = feature_cols
     results["info"]         = info
 
     # ── ARIMA ──
-    with st.spinner("Training ARIMA model (this may take ~30 seconds)..."):
+    with st.spinner("Training ARIMA model (~30 seconds)..."):
         close = feat_df["Close"]
         arima_model, arima_split = train_arima(close)
         arima_preds  = arima_rolling_forecast(close, arima_model, arima_split)
@@ -204,29 +220,51 @@ def run_pipeline(ticker: str, years: int, forecast_days: int):
         dates=feat_df.index,
     )
 
+    # ── XGBoost (fast — trains in seconds) ──
+    with st.spinner("Training XGBoost model..."):
+        xgb_model, xgb_X_test, xgb_y_test, xgb_importances = train_xgboost(
+            feat_df, feature_cols
+        )
+        xgb_prob = xgb_predict_latest(xgb_model, feat_df, feature_cols)
+        xgb_met  = xgb_metrics(xgb_model, xgb_X_test, xgb_y_test)
+    results["xgb"] = dict(
+        model=xgb_model, prob=xgb_prob, metrics=xgb_met,
+        importances=xgb_importances,
+        X_test=xgb_X_test, y_test=xgb_y_test,
+    )
+
     # ── LSTM ──
     model_path = os.path.join("cache", f"{ticker.replace('.','_')}_lstm.keras")
-    with st.spinner("Training LSTM model (60–120 seconds depending on data size)..."):
+    with st.spinner("Training LSTM model (60–120 seconds)..."):
         lstm_model, scaler, history, split_idx, X_test, y_test = train_lstm(
             feat_df, feature_cols,
             window=60, train_ratio=0.8,
             epochs=100, batch_size=32, patience=10,
             model_path=model_path,
         )
-        lstm_prob  = lstm_predict_latest(lstm_model, scaler, feat_df, feature_cols)
-        lstm_met   = lstm_metrics(lstm_model, X_test, y_test)
+        lstm_prob = lstm_predict_latest(lstm_model, scaler, feat_df, feature_cols)
+        lstm_met  = lstm_metrics(lstm_model, X_test, y_test)
     results["lstm"] = dict(
         model=lstm_model, scaler=scaler, history=history,
         prob=lstm_prob, metrics=lstm_met,
         X_test=X_test, y_test=y_test,
     )
 
+    # ── Walk-Forward Validation ──
+    with st.spinner("Running walk-forward validation (5 folds)..."):
+        wfv = walk_forward_validate(
+            feat_df, feature_cols, feat_df["Close"],
+            lstm_model, scaler,
+            n_splits=5, initial_train_ratio=0.6, window=60,
+        )
+    results["wfv"] = wfv
+
     return results
 
 
 # ── trigger pipeline ──────────────────────────────────────────────────────────
 if run_btn or (auto_refresh and st.session_state.results is None):
-    st.session_state.results     = run_pipeline(ticker, years, forecast_days)
+    st.session_state.results     = run_pipeline(ticker, years, forecast_days, active_sector)
     st.session_state.last_ticker = ticker
 
 results = st.session_state.results
@@ -262,17 +300,22 @@ st.divider()
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 2 — Signal Card
 # ─────────────────────────────────────────────────────────────────────────────
-arima_r   = results["arima"]
-lstm_r    = results["lstm"]
+arima_r = results["arima"]
+lstm_r  = results["lstm"]
+xgb_r   = results["xgb"]
 
-lstm_prob    = lstm_r["prob"]
-arima_next   = float(arima_r["fc"][0])
-rsi_val      = safe_last(feat_df["rsi"])
+lstm_prob     = lstm_r["prob"]
+xgb_prob      = xgb_r["prob"]
+arima_next    = float(arima_r["fc"][0])
+rsi_val       = safe_last(feat_df["rsi"])
 macd_hist_val = safe_last(feat_df["macd_hist"])
 
-signal, sig_color = generate_signal(lstm_prob, rsi_val, macd_hist_val,
-                                     arima_next, current_price)
-trend_txt, trend_color = trend_label(lstm_prob)
+# Weighted ensemble: 40% LSTM + 40% XGBoost + 20% ARIMA direction
+ens_prob_val  = ensemble_prob(lstm_prob, xgb_prob, arima_next, current_price)
+
+signal, sig_color = generate_signal(lstm_prob, xgb_prob, rsi_val,
+                                     macd_hist_val, arima_next, current_price)
+trend_txt, trend_color = trend_label(ens_prob_val)
 
 bg_map = {
     "green": "#1b5e20", "lightgreen": "#2e7d32",
@@ -284,11 +327,13 @@ st.markdown(f"""
 <div class="signal-card" style="background:{bg};">
   <div class="signal-text" style="color:white;">{signal}</div>
   <div style="color:rgba(255,255,255,0.85); font-size:1.1rem; margin-top:8px;">
-    LSTM Confidence: <b>{lstm_prob*100:.1f}%</b> &nbsp;|&nbsp;
+    Ensemble Confidence: <b>{ens_prob_val*100:.1f}%</b> &nbsp;|&nbsp;
     Trend: <span style="color:{trend_color};font-weight:700;">{trend_txt}</span>
   </div>
   <div style="color:rgba(255,255,255,0.75); font-size:1rem; margin-top:6px;">
-    ARIMA next-day price forecast: <b>₹{arima_next:,.2f}</b> &nbsp;|&nbsp;
+    LSTM: <b>{lstm_prob*100:.1f}%</b> &nbsp;·&nbsp;
+    XGBoost: <b>{xgb_prob*100:.1f}%</b> &nbsp;|&nbsp;
+    ARIMA next-day: <b>₹{arima_next:,.2f}</b> &nbsp;|&nbsp;
     RSI: <b>{rsi_val:.1f}</b>
   </div>
 </div>
@@ -351,7 +396,7 @@ fig_price.update_layout(
     template="plotly_dark", margin=dict(l=0, r=0, t=20, b=0),
     legend=dict(orientation="h", y=1.02),
 )
-st.plotly_chart(fig_price, use_container_width=True)
+st.plotly_chart(fig_price, width="stretch")
 
 st.divider()
 
@@ -372,7 +417,7 @@ with col_rsi:
     fig_rsi.update_layout(title="RSI (14)", height=280,
                            template="plotly_dark", margin=dict(l=0, r=0, t=40, b=0),
                            showlegend=False)
-    st.plotly_chart(fig_rsi, use_container_width=True)
+    st.plotly_chart(fig_rsi, width="stretch")
 
 with col_macd:
     fig_macd = go.Figure()
@@ -387,7 +432,7 @@ with col_macd:
     fig_macd.update_layout(title="MACD", height=280,
                             template="plotly_dark", margin=dict(l=0, r=0, t=40, b=0),
                             legend=dict(orientation="h", y=1.15, font_size=10))
-    st.plotly_chart(fig_macd, use_container_width=True)
+    st.plotly_chart(fig_macd, width="stretch")
 
 with col_bbw:
     fig_bbw = go.Figure()
@@ -397,7 +442,7 @@ with col_bbw:
     fig_bbw.update_layout(title="Bollinger Band Width (Squeeze Indicator)",
                            height=280, template="plotly_dark",
                            margin=dict(l=0, r=0, t=40, b=0), showlegend=False)
-    st.plotly_chart(fig_bbw, use_container_width=True)
+    st.plotly_chart(fig_bbw, width="stretch")
 
 st.divider()
 
@@ -406,8 +451,8 @@ st.divider()
 # ─────────────────────────────────────────────────────────────────────────────
 st.subheader("Model Performance & Forecast")
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["ARIMA Evaluation", "LSTM Training", "Future Forecast", "Metrics Comparison"]
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["ARIMA Evaluation", "LSTM Training", "Future Forecast", "Metrics Comparison", "Walk-Forward Validation"]
 )
 
 # ── Tab 1: ARIMA actual vs predicted ─────────────────────────────────────────
@@ -425,7 +470,7 @@ with tab1:
     fig_arima.update_layout(title="ARIMA: Actual vs Predicted (Test Set)",
                              height=380, template="plotly_dark",
                              margin=dict(l=0, r=0, t=40, b=0))
-    st.plotly_chart(fig_arima, use_container_width=True)
+    st.plotly_chart(fig_arima, width="stretch")
 
     m = arima_r["metrics"]
     ca, cb, cc = st.columns(3)
@@ -452,6 +497,80 @@ with tab2:
                             margin=dict(l=0, r=0, t=40, b=0),
                             legend=dict(orientation="h", y=1.1))
     st.plotly_chart(fig_hist, use_container_width=True)
+
+    # ── LSTM Actual vs Predicted ──
+    st.markdown("#### Actual vs Predicted (Test Set)")
+
+    split_idx  = lstm_r["history"].params.get("steps", 0)  # fallback
+    # Recover test period dates: test set starts after the 80% train split
+    train_split = int(len(feat_df) * 0.8)
+    # The LSTM needs `window` rows to form the first sequence, so test dates
+    # start at train_split + window
+    window       = 60
+    test_dates   = feat_df.index[train_split + window:]
+    test_close   = feat_df["Close"].iloc[train_split + window:].values
+
+    X_test_lstm  = lstm_r["X_test"]
+    y_test_lstm  = lstm_r["y_test"]
+    probs        = lstm_r["model"].predict(X_test_lstm, verbose=0).flatten()
+    preds        = (probs > 0.5).astype(int)
+
+    # Align lengths (test_dates may differ by 1 due to target shift)
+    n = min(len(test_dates), len(probs))
+    test_dates  = test_dates[:n]
+    test_close  = test_close[:n]
+    probs       = probs[:n]
+    preds       = preds[:n]
+    y_test_lstm = y_test_lstm[:n]
+
+    correct   = preds == y_test_lstm.astype(int)
+
+    fig_lstm_pred = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.65, 0.35], vertical_spacing=0.04,
+        subplot_titles=("Close Price + Direction Calls", "LSTM Up-Probability"),
+    )
+
+    # Close price line
+    fig_lstm_pred.add_trace(go.Scatter(
+        x=test_dates, y=test_close,
+        name="Close", line=dict(color="#90caf9", width=1.5),
+    ), row=1, col=1)
+
+    # Correct predictions — green dots
+    fig_lstm_pred.add_trace(go.Scatter(
+        x=test_dates[correct], y=test_close[correct],
+        mode="markers", name="Correct",
+        marker=dict(color="#26a69a", size=5, symbol="circle"),
+    ), row=1, col=1)
+
+    # Wrong predictions — red dots
+    fig_lstm_pred.add_trace(go.Scatter(
+        x=test_dates[~correct], y=test_close[~correct],
+        mode="markers", name="Wrong",
+        marker=dict(color="#ef5350", size=5, symbol="x"),
+    ), row=1, col=1)
+
+    # Probability line with 0.55 / 0.45 bands
+    fig_lstm_pred.add_trace(go.Scatter(
+        x=test_dates, y=probs,
+        name="Up-Prob", line=dict(color="#ffa726", width=1.5),
+        fill="tozeroy", fillcolor="rgba(255,167,38,0.08)",
+    ), row=2, col=1)
+    fig_lstm_pred.add_hline(y=0.55, line_dash="dash", line_color="#26a69a",
+                             annotation_text="Buy zone", row=2, col=1)
+    fig_lstm_pred.add_hline(y=0.45, line_dash="dash", line_color="#ef5350",
+                             annotation_text="Sell zone", row=2, col=1)
+    fig_lstm_pred.add_hline(y=0.50, line_dash="dot",  line_color="gray", row=2, col=1)
+
+    acc_pct = correct.mean() * 100
+    fig_lstm_pred.update_layout(
+        title=f"LSTM Test Set — Accuracy: {acc_pct:.1f}%",
+        height=520, template="plotly_dark",
+        margin=dict(l=0, r=0, t=50, b=0),
+        legend=dict(orientation="h", y=1.05),
+    )
+    st.plotly_chart(fig_lstm_pred, use_container_width=True)
 
 # ── Tab 3: Future forecast ────────────────────────────────────────────────────
 with tab3:
@@ -482,34 +601,113 @@ with tab3:
     fig_fc.update_layout(title=f"ARIMA {forecast_days}-Day Forecast with 95% CI",
                           height=420, template="plotly_dark",
                           margin=dict(l=0, r=0, t=40, b=0))
-    st.plotly_chart(fig_fc, use_container_width=True)
+    st.plotly_chart(fig_fc, width="stretch")
 
-# ── Tab 4: Side-by-side metrics ───────────────────────────────────────────────
+# ── Tab 4: Side-by-side metrics + feature importance ──────────────────────────
 with tab4:
     am = arima_r["metrics"]
     lm = lstm_r["metrics"]
+    xm = xgb_r["metrics"]
 
     comparison = pd.DataFrame({
         "ARIMA": {
-            "MAE (₹)":    f"{am['MAE']:.2f}",
-            "RMSE (₹)":   f"{am['RMSE']:.2f}",
-            "MAPE (%)":   f"{am['MAPE']:.2f}",
-            "Accuracy":   "—",
-            "Precision":  "—",
-            "Recall":     "—",
-            "F1 Score":   "—",
+            "MAE (₹)":   f"{am['MAE']:.2f}",
+            "RMSE (₹)":  f"{am['RMSE']:.2f}",
+            "MAPE (%)":  f"{am['MAPE']:.2f}",
+            "Accuracy":  "—",
+            "Precision": "—",
+            "Recall":    "—",
+            "F1 Score":  "—",
+        },
+        "XGBoost": {
+            "MAE (₹)":   "—",
+            "RMSE (₹)":  "—",
+            "MAPE (%)":  "—",
+            "Accuracy":  f"{xm['Accuracy']*100:.1f}%",
+            "Precision": f"{xm['Precision']*100:.1f}%",
+            "Recall":    f"{xm['Recall']*100:.1f}%",
+            "F1 Score":  f"{xm['F1']*100:.1f}%",
         },
         "LSTM": {
-            "MAE (₹)":    "—",
-            "RMSE (₹)":   "—",
-            "MAPE (%)":   "—",
-            "Accuracy":   f"{lm['Accuracy']*100:.1f}%",
-            "Precision":  f"{lm['Precision']*100:.1f}%",
-            "Recall":     f"{lm['Recall']*100:.1f}%",
-            "F1 Score":   f"{lm['F1']*100:.1f}%",
+            "MAE (₹)":   "—",
+            "RMSE (₹)":  "—",
+            "MAPE (%)":  "—",
+            "Accuracy":  f"{lm['Accuracy']*100:.1f}%",
+            "Precision": f"{lm['Precision']*100:.1f}%",
+            "Recall":    f"{lm['Recall']*100:.1f}%",
+            "F1 Score":  f"{lm['F1']*100:.1f}%",
         },
     })
-    st.dataframe(comparison, use_container_width=True)
+    st.dataframe(comparison, width="stretch")
+
+    # XGBoost feature importance chart — top 15
+    st.subheader("Top 15 Most Important Features (XGBoost)")
+    imp     = xgb_r["importances"]
+    top15   = dict(list(imp.items())[:15])
+    fig_imp = go.Figure(go.Bar(
+        x=list(top15.values()),
+        y=list(top15.keys()),
+        orientation="h",
+        marker_color="#42a5f5",
+    ))
+    fig_imp.update_layout(
+        height=400, template="plotly_dark",
+        margin=dict(l=0, r=0, t=20, b=0),
+        yaxis=dict(autorange="reversed"),
+    )
+    st.plotly_chart(fig_imp, width="stretch")
+
+# ── Tab 5: Walk-Forward Validation ───────────────────────────────────────────
+with tab5:
+    wfv_data = results["wfv"]
+    folds_df = wfv_data["folds"]
+
+    st.markdown("""
+    **Walk-Forward Validation** trains on all data up to each fold boundary and tests
+    on the next unseen window — a more honest estimate of real-world accuracy than a
+    single train/test split.
+    """)
+
+    if folds_df.empty:
+        st.warning("Not enough data to run walk-forward validation.")
+    else:
+        # Accuracy chart per fold
+        fig_wfv = go.Figure()
+        fig_wfv.add_trace(go.Bar(
+            x=folds_df["Fold"].astype(str),
+            y=folds_df["XGB Accuracy"],
+            name="XGBoost (retrained each fold)",
+            marker_color="#42a5f5",
+        ))
+        lstm_vals = folds_df["LSTM Accuracy"].dropna()
+        if not lstm_vals.empty:
+            fig_wfv.add_trace(go.Bar(
+                x=folds_df.loc[folds_df["LSTM Accuracy"].notna(), "Fold"].astype(str),
+                y=folds_df["LSTM Accuracy"].dropna(),
+                name="LSTM (fixed model, rolling eval)",
+                marker_color="#ef5350",
+            ))
+        fig_wfv.add_hline(y=50, line_dash="dash", line_color="gray",
+                           annotation_text="Random baseline (50%)")
+        fig_wfv.update_layout(
+            title="Accuracy per Walk-Forward Fold",
+            xaxis_title="Fold", yaxis_title="Accuracy (%)",
+            height=380, template="plotly_dark", barmode="group",
+            margin=dict(l=0, r=0, t=40, b=0),
+            yaxis=dict(range=[40, 100]),
+        )
+        st.plotly_chart(fig_wfv, use_container_width=True)
+
+        # Summary stats
+        st.markdown("**Per-fold detail**")
+        st.dataframe(folds_df.set_index("Fold"), use_container_width=True)
+
+        xgb_mean = folds_df["XGB Accuracy"].mean()
+        xgb_std  = folds_df["XGB Accuracy"].std()
+        st.info(
+            f"XGBoost walk-forward mean accuracy: **{xgb_mean:.1f}%** ± {xgb_std:.1f}%  "
+            f"(vs single-split: {xgb_r['metrics']['Accuracy']*100:.1f}%)"
+        )
 
 # ── footer ────────────────────────────────────────────────────────────────────
 st.divider()
