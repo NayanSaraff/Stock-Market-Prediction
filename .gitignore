@@ -27,6 +27,10 @@ models/
 *.pkl
 *.joblib
 *.pb
+*.keras
+
+# Cache Data
+cache/
 
 # Plots / Generated Figures
 plots/
