@@ -1,23 +1,11 @@
-# Core Data Science & Processing
+yfinance>=0.2.0
 pandas>=1.3.0
 numpy>=1.19.5
 scikit-learn>=1.0.2
-
-# Data Fetching
-yfinance>=0.2.0
-
-# Visualization
-matplotlib>=3.5.0
-seaborn>=0.11.2
-
-# Time Series & Classical Models (ARIMA)
+tensorflow>=2.12.0
 statsmodels>=0.13.0
 pmdarima>=2.0.0
-
-# Deep Learning (LSTM)
-tensorflow>=2.12.0
-
-# Jupyter Notebook dependencies (optional but recommended for running the .ipynb files)
-jupyter>=1.0.0
-ipykernel>=6.0.0
-nbformat>=5.1.0
+streamlit>=1.28.0
+plotly>=5.0.0
+ta>=0.10.0
+matplotlib>=3.5.0
