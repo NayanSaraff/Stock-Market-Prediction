@@ -28,6 +28,8 @@ def fetch_ohlcv(ticker: str, years: int = 5) -> pd.DataFrame:
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df.index = pd.to_datetime(df.index)
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
         df.to_csv(path)
         return df
     except Exception:
