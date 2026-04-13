@@ -89,7 +89,7 @@ def add_earnings_proximity(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     import yfinance as yf
 
     df = df.copy()
-    dates = pd.to_datetime(df.index)
+    dates = pd.to_datetime(df.index, utc=True).tz_localize(None)
     proximity = pd.Series(0, index=df.index, dtype=float)
 
     earnings_dates = []
@@ -97,14 +97,18 @@ def add_earnings_proximity(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
         t = yf.Ticker(ticker)
         ed = t.earnings_dates
         if ed is not None and not ed.empty:
-            earnings_dates = pd.to_datetime(ed.index).normalize().tolist()
+            ed_idx = pd.to_datetime(ed.index)
+            if ed_idx.tz is not None:
+                ed_idx = ed_idx.tz_localize(None)
+            earnings_dates = ed_idx.normalize().tolist()
     except Exception:
         pass
 
     if earnings_dates:
         for ed in earnings_dates:
-            mask = (dates >= ed - pd.Timedelta(days=7)) & \
-                   (dates <= ed + pd.Timedelta(days=3))
+            ed_ts = pd.to_datetime(ed, utc=True).tz_localize(None)
+            mask = (dates >= ed_ts - pd.Timedelta(days=7)) & \
+                   (dates <= ed_ts + pd.Timedelta(days=3))
             proximity[mask] = 1.0
     else:
         # Heuristic fallback: last 5 trading days of Mar/Jun/Sep/Dec

@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from streamlit_autorefresh import st_autorefresh
 
 warnings.filterwarnings("ignore")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -151,37 +152,10 @@ div[data-baseweb="select"] input:focus {
     color: #f6b93b;
 }
 
-.signal-card {
-    border-radius: 10px;
-    border: 1px solid var(--bb-border);
-    padding: 22px 24px;
-    text-align: center;
-    margin: 10px 0 6px 0;
-    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.35);
-}
-
-.signal-text {
-    font-size: 2.45rem;
-    font-weight: 800;
-    letter-spacing: 1.4px;
-    font-family: 'JetBrains Mono', monospace;
-}
-
-.metric-label { font-size: 0.78rem; color: var(--bb-muted); text-transform: uppercase; }
-.metric-val   { font-size: 1.4rem; font-weight: 700; }
-
-[data-testid="stMetric"] {
-    border: 1px solid var(--bb-border);
-    border-radius: 8px;
-    background: linear-gradient(180deg, var(--bb-panel) 0%, var(--bb-panel-2) 100%);
-    padding: 0.55rem 0.75rem;
-}
-
 [data-testid="stMetricLabel"] {
     color: var(--bb-muted);
-    font-size: 0.64rem;
-    letter-spacing: 0.6px;
-    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 0.3px;
     line-height: 1.2;
     white-space: normal !important;
     overflow: visible !important;
@@ -189,9 +163,9 @@ div[data-baseweb="select"] input:focus {
 }
 
 [data-testid="stMetricValue"] {
-    font-family: 'JetBrains Mono', monospace;
     color: var(--bb-text);
-    font-size: 1.02rem;
+    font-size: 1.4rem;
+    font-weight: 500;
     line-height: 1.2;
     white-space: normal !important;
     overflow: visible !important;
@@ -412,17 +386,13 @@ if "last_ticker" not in st.session_state:
 if "auto_refresh_due" not in st.session_state:
     st.session_state.auto_refresh_due = False
 
-# ── auto-refresh countdown ────────────────────────────────────────────────────
+# ── auto-refresh ──────────────────────────────────────────────────────────────
 if auto_refresh:
-    refresh_placeholder = st.sidebar.empty()
-    if "next_refresh" not in st.session_state:
-        st.session_state.next_refresh = time.time() + 300
-    remaining = int(st.session_state.next_refresh - time.time())
-    if remaining <= 0:
-        st.session_state.next_refresh = time.time() + 300
+    # st_autorefresh injects a JS timer — actually triggers a rerun every 5 min
+    count = st_autorefresh(interval=300_000, limit=None, key="autorefresh")
+    if count > 0:
         st.session_state.auto_refresh_due = True
-        st.rerun()
-    refresh_placeholder.info(f"Next refresh in {remaining}s")
+    st.sidebar.info("Auto-refresh ON — every 5 min")
 
 
 # ── cached data fetchers ──────────────────────────────────────────────────────
@@ -570,36 +540,20 @@ info   = results["info"]
 feat_df = results["feat_df"]
 df      = results["df"]
 
-st.markdown(
-    (
-        "<div class='terminal-strip'>"
-        f"<span class='label'>Instrument:</span> <span class='value'>{display_ticker}</span>"
-        f"<span class='label'>Sector:</span> <span class='value'>{display_sector}</span>"
-        f"<span class='label'>Horizon:</span> <span class='value'>{forecast_days}D</span>"
-        f"<span class='label'>Updated:</span> <span class='value'>{time.strftime('%d-%b-%Y %H:%M:%S')}</span>"
-        "</div>"
-    ),
-    unsafe_allow_html=True,
-)
-
-terminal_section("Market Snapshot")
 display_name = info.get("name") or display_ticker
-logo_url = get_stock_logo_url(display_ticker, display_name)
 st.markdown(
         f"""
-        <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:0.15rem;">
-            <img src="{logo_url}" alt="{display_name} logo"
-                     style="width:42px; height:42px; border-radius:8px; border:1px solid #2a3345;
-                                    background:#111723; object-fit:contain; padding:4px;" />
-            <div style="font-size:1.75rem; font-weight:700; line-height:1.2; color:#d9e1ee;">
-                {display_name}
-                <span style="font-family:'JetBrains Mono', monospace; color:#f2a900; font-size:1.05rem;">{display_ticker}</span>
+        <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:0.15rem; margin-top:1rem;">
+            <div style="font-size:1.85rem; font-weight:700; line-height:1.2; color:#ffffff;">
+                {display_name} 
+                <span style="background-color:rgba(38,166,154,0.15); color:#26a69a; padding: 2px 8px; border-radius: 4px; font-family:'JetBrains Mono', monospace; font-size:1.1rem; margin-left:8px;">{display_ticker}</span>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
 )
 st.caption(f"Sector: {info['sector']}")
+st.markdown("<div style='height:0.5rem;'></div>", unsafe_allow_html=True)
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 current_price = info["current_price"] or safe_last(feat_df["Close"])
@@ -613,9 +567,8 @@ c4.metric("52-Week Low",    f"₹{info['week52_low']:,.2f}")
 c5.metric("Volume",         f"{info['volume']:,}" if info['volume'] else "N/A")
 c6.metric("Market Cap",     fmt_inr(info['market_cap']) if info['market_cap'] else "N/A")
 
-st.markdown("<div style='height:0.35rem;'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height:1.5rem;'></div>", unsafe_allow_html=True)
 
-terminal_section("Signal Engine")
 arima_r = results["arima"]
 lstm_r  = results["lstm"]
 xgb_r   = results["xgb"]
@@ -634,35 +587,32 @@ signal, sig_color = generate_signal(lstm_prob, xgb_prob, rsi_val,
 trend_txt, trend_color = trend_label(ens_prob_val)
 
 bg_map = {
-    "green": "#1b5e20", "lightgreen": "#2e7d32",
-    "orange": "#e65100", "red": "#b71c1c", "gray": "#37474f",
+    "green": "#388e3c", "lightgreen": "#4caf50",
+    "orange": "#f57c00", "red": "#d32f2f", "gray": "#455a64",
 }
-bg = bg_map.get(sig_color, "#37474f")
+bg = bg_map.get(sig_color, "#455a64")
+trend_icon = '↗' if trend_color=='green' else '↘' if trend_color=='red' else '→'
 
 st.markdown(f"""
-<div class="signal-card" style="background:{bg};">
-  <div class="signal-text" style="color:white;">{signal}</div>
-  <div style="color:rgba(255,255,255,0.85); font-size:1.1rem; margin-top:8px;">
-    Ensemble Confidence: <b>{ens_prob_val*100:.1f}%</b> &nbsp;|&nbsp;
-    Trend: <span style="color:{trend_color};font-weight:700;">{trend_txt}</span>
+<div style="background-color: {bg}; border-radius: 12px; padding: 28px; text-align: center; margin-bottom: 2.5rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+  <div style="color: white; font-size: 2.8rem; font-weight: 800; letter-spacing: 1.5px; margin-bottom: 8px; text-transform: uppercase;">
+    {signal}
   </div>
-  <div style="color:rgba(255,255,255,0.75); font-size:1rem; margin-top:6px;">
-    LSTM: <b>{lstm_prob*100:.1f}%</b> &nbsp;·&nbsp;
-    XGBoost: <b>{xgb_prob*100:.1f}%</b> &nbsp;|&nbsp;
-    ARIMA next-day: <b>₹{arima_next:,.2f}</b> &nbsp;|&nbsp;
-    RSI: <b>{rsi_val:.1f}</b>
+  <div style="color: rgba(255, 255, 255, 0.9); font-size: 0.95rem; font-weight: 500; margin-bottom: 4px;">
+    LSTM Confidence: <b>{lstm_prob*100:.1f}%</b> &nbsp;|&nbsp; Trend: {trend_txt} {trend_icon}
+  </div>
+  <div style="color: rgba(255, 255, 255, 0.75); font-size: 0.85rem;">
+    ARIMA next-day price forecast: ₹{arima_next:,.2f} &nbsp;|&nbsp; RSI: {rsi_val:.1f}
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-st.markdown("<div style='height:0.55rem;'></div>", unsafe_allow_html=True)
-
-terminal_section("Price Action | Last 6 Months")
+st.markdown("### Price Chart — Last 6 Months")
 chart_df = feat_df.iloc[-130:]  # ~6 months
 
 fig_price = make_subplots(
     rows=2, cols=1, shared_xaxes=True,
-    row_heights=[0.75, 0.25], vertical_spacing=0.03,
+    row_heights=[0.8, 0.2], vertical_spacing=0.03,
 )
 
 # Candlestick
@@ -705,8 +655,8 @@ fig_price.add_trace(go.Bar(
 ), row=2, col=1)
 
 fig_price.update_layout(
-    height=520, xaxis_rangeslider_visible=False,
-    template="plotly_dark", margin=dict(l=0, r=0, t=60, b=10),
+    height=450, xaxis_rangeslider_visible=False,
+    template="plotly_dark", margin=dict(l=0, r=0, t=20, b=10),
     legend=dict(
         orientation="h",
         yanchor="bottom",
@@ -714,59 +664,65 @@ fig_price.update_layout(
         xanchor="left",
         x=0,
     ),
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)"
 )
 st.plotly_chart(fig_price, use_container_width=True)
 
-st.markdown("<div style='height:0.55rem;'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height:1.5rem;'></div>", unsafe_allow_html=True)
+st.markdown("### Technical Indicators")
 
-terminal_section("Technical Indicators")
 ind_df = feat_df.iloc[-260:]  # ~1 year for indicators
 
-fig_rsi = go.Figure()
-fig_rsi.add_trace(go.Scatter(x=ind_df.index, y=ind_df["rsi"],
-                              line=dict(color="#7c4dff"), name="RSI"))
-fig_rsi.add_hline(y=70, line_dash="dash", line_color="red",   annotation_text="Overbought")
-fig_rsi.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Oversold")
-fig_rsi.update_layout(title=dict(text="RSI (14)", font=dict(size=24), x=0.01, xanchor="left"), height=280,
-                       template="plotly_dark", margin=dict(l=0, r=0, t=40, b=0),
-                       showlegend=False)
-st.plotly_chart(fig_rsi, use_container_width=True)
-st.markdown("<div style='height: 1.8rem;'></div>", unsafe_allow_html=True)
+ti_c1, ti_c2, ti_c3 = st.columns(3)
 
-fig_macd = go.Figure()
-fig_macd.add_trace(go.Scatter(x=ind_df.index, y=ind_df["macd"],
-                               line=dict(color="#2196f3"), name="MACD"))
-fig_macd.add_trace(go.Scatter(x=ind_df.index, y=ind_df["macd_signal"],
-                               line=dict(color="orange"), name="Signal"))
-hist_colors = ["#26a69a" if v >= 0 else "#ef5350"
-               for v in ind_df["macd_hist"].fillna(0)]
-fig_macd.add_trace(go.Bar(x=ind_df.index, y=ind_df["macd_hist"],
-                           marker_color=hist_colors, name="Histogram"))
-fig_macd.update_layout(title=dict(text="MACD", font=dict(size=24), x=0.01, xanchor="left"), height=280,
-                        template="plotly_dark", margin=dict(l=0, r=0, t=70, b=0),
-                        legend=dict(
-                            orientation="h",
-                            yanchor="bottom",
-                            y=1.02,
-                            xanchor="left",
-                            x=0,
-                            font_size=10,
-                        ))
-st.plotly_chart(fig_macd, use_container_width=True)
-st.markdown("<div style='height: 1.8rem;'></div>", unsafe_allow_html=True)
+with ti_c1:
+    fig_rsi = go.Figure()
+    fig_rsi.add_trace(go.Scatter(x=ind_df.index, y=ind_df["rsi"],
+                                  line=dict(color="#7c4dff"), name="RSI"))
+    fig_rsi.add_hline(y=70, line_dash="dash", line_color="red",   annotation_text="Overbought")
+    fig_rsi.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Oversold")
+    fig_rsi.update_layout(title=dict(text="RSI (14)", font=dict(size=16), x=0.01, xanchor="left"), height=250,
+                           template="plotly_dark", margin=dict(l=10, r=10, t=40, b=10),
+                           showlegend=False, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    st.plotly_chart(fig_rsi, use_container_width=True)
 
-fig_bbw = go.Figure()
-fig_bbw.add_trace(go.Scatter(x=ind_df.index, y=ind_df["bb_width"],
-                              fill="tozeroy", line=dict(color="#ff6f00"),
-                              name="BB Width"))
-fig_bbw.update_layout(title=dict(text="Bollinger Band Width (Squeeze Indicator)", font=dict(size=24), x=0.01, xanchor="left"),
-                       height=280, template="plotly_dark",
-                       margin=dict(l=0, r=0, t=40, b=0), showlegend=False)
-st.plotly_chart(fig_bbw, use_container_width=True)
+with ti_c2:
+    fig_macd = go.Figure()
+    fig_macd.add_trace(go.Scatter(x=ind_df.index, y=ind_df["macd"],
+                                   line=dict(color="#2196f3"), name="MACD"))
+    fig_macd.add_trace(go.Scatter(x=ind_df.index, y=ind_df["macd_signal"],
+                                   line=dict(color="orange"), name="Signal"))
+    hist_colors = ["#26a69a" if v >= 0 else "#ef5350"
+                   for v in ind_df["macd_hist"].fillna(0)]
+    fig_macd.add_trace(go.Bar(x=ind_df.index, y=ind_df["macd_hist"],
+                               marker_color=hist_colors, name="Histogram"))
+    fig_macd.update_layout(title=dict(text="MACD", font=dict(size=16), x=0.01, xanchor="left"), height=250,
+                            template="plotly_dark", margin=dict(l=10, r=10, t=40, b=10),
+                            legend=dict(
+                                orientation="h",
+                                yanchor="bottom",
+                                y=1.02,
+                                xanchor="right",
+                                x=1,
+                                font_size=10,
+                            ), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    st.plotly_chart(fig_macd, use_container_width=True)
 
-st.markdown("<div style='height:0.55rem;'></div>", unsafe_allow_html=True)
+with ti_c3:
+    fig_bbw = go.Figure()
+    fig_bbw.add_trace(go.Scatter(x=ind_df.index, y=ind_df["bb_width"],
+                                  fill="tozeroy", line=dict(color="#ff6f00"),
+                                  name="BB Width"))
+    fig_bbw.update_layout(title=dict(text="Bollinger Band Width (Squeeze Indicator)", font=dict(size=16), x=0.01, xanchor="left"),
+                           height=250, template="plotly_dark",
+                           margin=dict(l=10, r=10, t=40, b=10), showlegend=False, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    st.plotly_chart(fig_bbw, use_container_width=True)
 
-terminal_section("Model Performance & Forecast")
+st.markdown("<div style='height:1.5rem;'></div>", unsafe_allow_html=True)
+
+st.markdown("### Model Performance & Forecast")
+
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     ["ARIMA Evaluation", "LSTM Training", "Future Forecast", "Metrics Comparison", "Walk-Forward Validation"]
@@ -802,7 +758,7 @@ with tab1:
     cb.metric("RMSE", f"₹{m['RMSE']:.2f}")
     cc.metric("MAPE", f"{m['MAPE']:.2f}%")
 
-# ── Tab 2: LSTM training curves ───────────────────────────────────────────────
+# ── Tab 2: LSTM training curves ─────────────────────────────────────────────
 with tab2:
     hist = lstm_r["history"].history
     epochs_range = list(range(1, len(hist["accuracy"]) + 1))
@@ -825,11 +781,7 @@ with tab2:
     # ── LSTM Actual vs Predicted ──
     st.markdown("#### Actual vs Predicted (Test Set)")
 
-    split_idx  = lstm_r["history"].params.get("steps", 0)  # fallback
-    # Recover test period dates: test set starts after the 80% train split
     train_split = int(len(feat_df) * 0.8)
-    # The LSTM needs `window` rows to form the first sequence, so test dates
-    # start at train_split + window
     window       = 60
     test_dates   = feat_df.index[train_split + window:]
     test_close   = feat_df["Close"].iloc[train_split + window:].values
@@ -839,7 +791,6 @@ with tab2:
     probs        = lstm_r["model"].predict(X_test_lstm, verbose=0).flatten()
     preds        = (probs > 0.5).astype(int)
 
-    # Align lengths (test_dates may differ by 1 due to target shift)
     n = min(len(test_dates), len(probs))
     test_dates  = test_dates[:n]
     test_close  = test_close[:n]
@@ -847,7 +798,7 @@ with tab2:
     preds       = preds[:n]
     y_test_lstm = y_test_lstm[:n]
 
-    correct   = preds == y_test_lstm.astype(int)
+    correct = preds == y_test_lstm.astype(int)
 
     fig_lstm_pred = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
@@ -855,27 +806,23 @@ with tab2:
         subplot_titles=("Close Price + Direction Calls", "LSTM Up-Probability"),
     )
 
-    # Close price line
     fig_lstm_pred.add_trace(go.Scatter(
         x=test_dates, y=test_close,
         name="Close", line=dict(color="#90caf9", width=1.5),
     ), row=1, col=1)
 
-    # Correct predictions — green dots
     fig_lstm_pred.add_trace(go.Scatter(
         x=test_dates[correct], y=test_close[correct],
         mode="markers", name="Correct",
         marker=dict(color="#26a69a", size=5, symbol="circle"),
     ), row=1, col=1)
 
-    # Wrong predictions — red dots
     fig_lstm_pred.add_trace(go.Scatter(
         x=test_dates[~correct], y=test_close[~correct],
         mode="markers", name="Wrong",
         marker=dict(color="#ef5350", size=5, symbol="x"),
     ), row=1, col=1)
 
-    # Probability line with 0.55 / 0.45 bands
     fig_lstm_pred.add_trace(go.Scatter(
         x=test_dates, y=probs,
         name="Up-Prob", line=dict(color="#ffa726", width=1.5),
